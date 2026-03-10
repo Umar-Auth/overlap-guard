@@ -1,0 +1,18 @@
+node_modules
+.env
+ngrok
+
+# VS Code extension build output
+overlap-guard-vscode/out/
+overlap-guard-vscode/node_modules/
+overlap-guard-vscode/*.vsix
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+
+# TypeScript build cache
+*.tsbuildinfo
