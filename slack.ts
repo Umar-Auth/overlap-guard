@@ -1,12 +1,16 @@
 import 'dotenv/config';
-import { App } from '@slack/bolt';
+import { App, ExpressReceiver } from '@slack/bolt';
 import { graphql } from '@octokit/graphql';
 import { LinearClient } from '@linear/sdk';
-import http from 'http';
+import express from 'express';
+
+const receiver = new ExpressReceiver({
+  signingSecret: process.env.SLACK_SIGNING_SECRET!,
+});
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN!,
-  signingSecret: process.env.SLACK_SIGNING_SECRET!,
+  receiver,
 });
 
 const gh = graphql.defaults({
@@ -61,99 +65,70 @@ function trackFile(user: string, file: string): string[] {
   return otherUsers;
 }
 
-// ---- HTTP server for VS Code extension ----
-const apiServer = http.createServer(async (req, res) => {
+// ---- HTTP routes for VS Code extension (on the same Express server as Slack) ----
+receiver.router.use(express.json());
+
+receiver.router.options('/activity', (_req, res) => { res.sendStatus(200); });
+receiver.router.options('/heartbeat', (_req, res) => { res.sendStatus(200); });
+
+receiver.router.use((_req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  next();
+});
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(200);
-    res.end();
+// POST /activity - report file activity from VS Code
+receiver.router.post('/activity', async (req, res) => {
+  const { user, file } = req.body;
+  if (!user || !file) {
+    res.status(400).json({ error: 'user and file required' });
     return;
   }
 
-  // POST /activity - report file activity from VS Code
-  if (req.method === 'POST' && req.url === '/activity') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', async () => {
-      try {
-        const { user, file } = JSON.parse(body);
-        if (!user || !file) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: 'user and file required' }));
-          return;
-        }
+  const overlaps = trackFile(user, file);
 
-        const overlaps = trackFile(user, file);
-
-        // Alert Slack if overlap detected
-        if (overlaps.length > 0) {
-          const others = overlaps.join(', ');
-          try {
-            await app.client.chat.postMessage({
-              channel: SLACK_CHANNEL,
-              text: `⚠️ File overlap detected! ${user} is editing ${file}, which ${others} is also working on.`,
-              blocks: [{
-                type: 'section',
-                text: {
-                  type: 'mrkdwn',
-                  text: `⚠️ *File Overlap Detected!*\n\n*\`${file}\`* is being edited by multiple people:\n• *${user}* (just now)\n${overlaps.map(u => `• *${u}*`).join('\n')}\n\nCoordinate to avoid merge conflicts!`
-                }
-              }]
-            });
-          } catch (err: any) {
-            console.error('Slack alert error:', err.message);
+  if (overlaps.length > 0) {
+    const others = overlaps.join(', ');
+    try {
+      await app.client.chat.postMessage({
+        channel: SLACK_CHANNEL,
+        text: `⚠️ File overlap detected! ${user} is editing ${file}, which ${others} is also working on.`,
+        blocks: [{
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `⚠️ *File Overlap Detected!*\n\n*\`${file}\`* is being edited by multiple people:\n• *${user}* (just now)\n${overlaps.map(u => `• *${u}*`).join('\n')}\n\nCoordinate to avoid merge conflicts!`
           }
-        }
-
-        res.writeHead(200);
-        res.end(JSON.stringify({ overlaps }));
-      } catch {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: 'invalid JSON' }));
-      }
-    });
-    return;
-  }
-
-  // GET /activity - get all current activity
-  if (req.method === 'GET' && req.url === '/activity') {
-    cleanStaleEntries();
-    const activity: Record<string, string[]> = {};
-    for (const [file, users] of activeFiles) {
-      activity[file] = [...users.keys()];
+        }]
+      });
+    } catch (err: any) {
+      console.error('Slack alert error:', err.message);
     }
-    res.writeHead(200);
-    res.end(JSON.stringify(activity));
-    return;
   }
 
-  // POST /heartbeat - keep-alive from VS Code
-  if (req.method === 'POST' && req.url === '/heartbeat') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const { user, files } = JSON.parse(body);
-        if (user && Array.isArray(files)) {
-          for (const file of files) {
-            trackFile(user, file);
-          }
-        }
-        res.writeHead(200);
-        res.end(JSON.stringify({ ok: true }));
-      } catch {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: 'invalid JSON' }));
-      }
-    });
-    return;
-  }
+  res.json({ overlaps });
+});
 
-  res.writeHead(404);
-  res.end(JSON.stringify({ error: 'not found' }));
+// GET /activity - get all current activity
+receiver.router.get('/activity', (_req, res) => {
+  cleanStaleEntries();
+  const activity: Record<string, string[]> = {};
+  for (const [file, users] of activeFiles) {
+    activity[file] = [...users.keys()];
+  }
+  res.json(activity);
+});
+
+// POST /heartbeat - keep-alive from VS Code
+receiver.router.post('/heartbeat', (req, res) => {
+  const { user, files } = req.body;
+  if (user && Array.isArray(files)) {
+    for (const file of files) {
+      trackFile(user, file);
+    }
+  }
+  res.json({ ok: true });
 });
 
 // ---- GitHub PR checks ----
@@ -333,13 +308,9 @@ app.command('/who-working', async ({ command, ack, say }) => {
   });
 });
 
-// ---- Start servers ----
-const API_PORT = Number(process.env.API_PORT || 3001);
+// ---- Start single server ----
+const PORT = process.env.PORT || 3000;
 
-app.start(process.env.PORT || 3000).then(() => {
-  console.log('🤖 Overlap Guard Slack bot ready on port 3000!');
-});
-
-apiServer.listen(API_PORT, () => {
-  console.log(`📡 Activity API ready on port ${API_PORT}!`);
+app.start(PORT).then(() => {
+  console.log(`🤖 Overlap Guard ready on port ${PORT} (Slack bot + Activity API)`);
 });
