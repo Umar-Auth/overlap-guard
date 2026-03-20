@@ -11,6 +11,9 @@ overlap-guard-vscode/*.vsix
 *.log
 npm-debug.log*
 
+# Runtime data
+data/
+
 # OS files
 .DS_Store
 

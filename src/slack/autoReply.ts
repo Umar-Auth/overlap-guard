@@ -1,5 +1,10 @@
+import { buildQueryReply, buildTaskReply } from '../brain/respond';
+import { classifyMessage } from '../brain/classifier';
 import { app, userClient } from '../clients';
 import { config } from '../config';
+import { logObservation } from '../observation/log';
+import { resolveProject } from '../projects/registry';
+import { clearAssistantLoader, showAssistantLoader } from './status';
 
 const RECENT_REPLY_WINDOW_MS = 5 * 60 * 1000;
 const recentAutoReplies = new Map<string, number>();
@@ -47,23 +52,12 @@ function cleanPromptText(text: string) {
   return text.replace(new RegExp(`<@${config.myUserId}>`, 'g'), '').replace(/\s+/g, ' ').trim();
 }
 
-function buildFallbackReply(senderName?: string) {
-  const intro = senderName ? `Hi ${senderName}, ` : 'Hi, ';
-  return `${intro}I saw your message. I'm away right now, but I'll follow up as soon as I'm back.`;
-}
-
-function extractResponseText(payload: any) {
-  if (typeof payload?.output_text === 'string' && payload.output_text.trim()) {
-    return payload.output_text.trim();
+async function safeProgress(action: () => Promise<void>, label: string) {
+  try {
+    await action();
+  } catch (err: any) {
+    debugLog(`assistant status step failed: ${label}`, { error: err.message });
   }
-
-  const parts = payload?.output
-    ?.flatMap((item: any) => item?.content ?? [])
-    ?.filter((item: any) => item?.type === 'output_text')
-    ?.map((item: any) => item.text?.trim())
-    ?.filter(Boolean);
-
-  return parts?.join('\n\n') || '';
 }
 
 async function getSenderName(userId: string) {
@@ -105,57 +99,6 @@ async function getAvailability() {
   } catch (err: any) {
     console.error('Slack availability check error:', err.message);
     return { unavailable: false, reason: 'availability check failed' };
-  }
-}
-
-async function generateAutoReply(messageText: string, senderName: string) {
-  const fallbackReply = buildFallbackReply(senderName);
-  if (!config.openAiApiKey) {
-    return fallbackReply;
-  }
-
-  try {
-    const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.openAiApiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.openAiModel,
-        input: [
-          {
-            role: 'system',
-            content: [
-              {
-                type: 'input_text',
-                text:
-                  'You are Umar replying in Slack while he is temporarily away. Reply as Umar in first person. Keep it short, helpful, natural, and specific to the message. If you are unsure, say you will follow up once back. Do not mention AI, automation, or a bot.',
-              },
-            ],
-          },
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'input_text',
-                text: `Sender: ${senderName}\nMessage: ${messageText || '(no additional text provided)'}`,
-              },
-            ],
-          },
-        ],
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`OpenAI request failed with ${response.status}`);
-    }
-
-    const payload = await response.json();
-    return extractResponseText(payload) || fallbackReply;
-  } catch (err: any) {
-    console.error('OpenAI auto-reply error:', err.message);
-    return fallbackReply;
   }
 }
 
@@ -230,6 +173,11 @@ export function registerAutoReply() {
       return;
     }
 
+    if (isOwnMessage && config.allowSelfTest && !isMention) {
+      debugLog('skipping self-test because own messages must still use an explicit mention');
+      return;
+    }
+
     const availability = await getAvailability();
     debugLog('availability check result', availability);
     if (!availability.unavailable) {
@@ -237,23 +185,78 @@ export function registerAutoReply() {
       return;
     }
 
+    const threadTs = message.thread_ts || message.ts;
+    await safeProgress(
+      () => showAssistantLoader(message.channel, threadTs, 'generic'),
+      'show generic loader'
+    );
+
     const senderName = isOwnMessage ? 'Umar' : await getSenderName(message.user);
     const promptText = cleanPromptText(message.text);
+
+    const project = resolveProject(promptText, message.channel);
+
+    const classification = await classifyMessage(promptText, project);
+    await safeProgress(
+      () => showAssistantLoader(message.channel, threadTs, classification.type === 'task' ? 'task' : 'query'),
+      'show typed loader'
+    );
+
+    logObservation({
+      kind: 'slack_inbound',
+      channelId: message.channel,
+      slackTs: threadTs,
+      senderId: message.user,
+      senderName,
+      promptText,
+      projectId: project?.id,
+      projectName: project?.name,
+      classification,
+    });
+
     debugLog('generating auto-reply', {
       senderName,
       promptText,
+      project: project?.name,
+      classification,
     });
-    const replyText = await generateAutoReply(promptText, senderName);
+
+    const replyText = classification.type === 'task'
+      ? await buildTaskReply({
+          messageText: promptText,
+          senderName,
+          channelId: message.channel,
+          slackTs: threadTs,
+          classification,
+          project,
+        })
+      : await buildQueryReply({
+          messageText: promptText,
+          senderName,
+          project,
+        });
 
     try {
-      await replyAsMe(message.channel, message.thread_ts || message.ts, replyText);
+      await replyAsMe(message.channel, threadTs, replyText);
+      await safeProgress(() => clearAssistantLoader(message.channel, threadTs), 'clear loader');
       markReplied(message.channel, message.ts);
+      logObservation({
+        kind: 'slack_outbound',
+        channelId: message.channel,
+        slackTs: threadTs,
+        senderId: config.myUserId,
+        projectId: project?.id,
+        projectName: project?.name,
+        classification,
+        replyText,
+      });
       debugLog('auto-reply sent successfully', {
         channel: message.channel,
-        threadTs: message.thread_ts || message.ts,
+        threadTs,
       });
       console.log(`Auto-replied to ${message.channel}:${message.ts} because ${availability.reason}`);
     } catch (err: any) {
+      await safeProgress(() => clearAssistantLoader(message.channel, threadTs), 'clear loader on failure');
       debugLog('auto-reply failed', { error: err.message });
       console.error('Slack auto-reply error:', err.message);
     }

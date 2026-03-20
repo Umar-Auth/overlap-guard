@@ -14,10 +14,16 @@ export const config = {
   autoReplyEnabled: process.env.SLACK_AUTO_REPLY_ENABLED !== 'false',
   allowSelfTest: process.env.SLACK_ALLOW_SELF_TEST === 'true',
   debugAutoReply: process.env.SLACK_DEBUG_AUTO_REPLY === 'true',
+  autoCreateLinearTasks: process.env.AUTO_CREATE_LINEAR_TASKS === 'true',
   autoReplyKeywords: (process.env.SLACK_UNAVAILABLE_STATUSES || 'away,lunch,offline,travel,ooo,vacation')
     .split(',')
     .map(keyword => keyword.trim().toLowerCase())
     .filter(Boolean),
   openAiApiKey: process.env.OPENAI_API_KEY,
-  openAiModel: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
+  openAiModel: process.env.OPENAI_MODEL || 'gpt-5-mini',
+  openAiClassifierModel: process.env.OPENAI_CLASSIFIER_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini',
+  openAiTaskModel: process.env.OPENAI_TASK_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini',
+  googleApiKey: process.env.GOOGLE_API_KEY,
+  googleImageModel: process.env.GOOGLE_IMAGE_MODEL || 'gemini-3.1-flash-image-preview',
+  linearDefaultTeamId: process.env.LINEAR_DEFAULT_TEAM_ID,
 };

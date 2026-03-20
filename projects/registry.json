@@ -1,0 +1,11 @@
+[
+  {
+    "id": "default",
+    "name": "frontend",
+    "description": "Primary default project for the delegate until more project-specific mappings are added.",
+    "repoOwner": "creatorfun",
+    "repoName": "frontend",
+    "keywords": ["frontend", "creatorfun", "slack", "bot", "overlap guard"],
+    "baseBranch": "staging"
+  }
+]
