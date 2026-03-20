@@ -1,9 +1,12 @@
-import { buildQueryReply, buildTaskReply } from '../brain/respond';
+import { buildQueryReply } from '../brain/respond';
 import { classifyMessage } from '../brain/classifier';
 import { app, userClient } from '../clients';
+import { runTaskAutomation } from '../automation/taskRunner';
 import { config } from '../config';
 import { logObservation } from '../observation/log';
 import { resolveProject } from '../projects/registry';
+import { getThreadContext } from './context';
+import { replyAsMe } from './replies';
 import { clearAssistantLoader, showAssistantLoader } from './status';
 
 const RECENT_REPLY_WINDOW_MS = 5 * 60 * 1000;
@@ -102,18 +105,6 @@ async function getAvailability() {
   }
 }
 
-async function replyAsMe(channel: string, threadTs: string, text: string) {
-  if (!userClient) {
-    throw new Error('SLACK_USER_TOKEN missing');
-  }
-
-  await userClient.chat.postMessage({
-    channel,
-    thread_ts: threadTs,
-    text,
-  });
-}
-
 export function registerAutoReply() {
   app.event('message', async ({ event }) => {
     const message = event as any;
@@ -193,10 +184,11 @@ export function registerAutoReply() {
 
     const senderName = isOwnMessage ? 'Umar' : await getSenderName(message.user);
     const promptText = cleanPromptText(message.text);
+    const threadContext = await getThreadContext(message.channel, threadTs, message.ts);
 
     const project = resolveProject(promptText, message.channel);
 
-    const classification = await classifyMessage(promptText, project);
+    const classification = await classifyMessage(promptText, project, threadContext);
     await safeProgress(
       () => showAssistantLoader(message.channel, threadTs, classification.type === 'task' ? 'task' : 'query'),
       'show typed loader'
@@ -218,22 +210,26 @@ export function registerAutoReply() {
       senderName,
       promptText,
       project: project?.name,
+      threadContext,
       classification,
     });
 
     const replyText = classification.type === 'task'
-      ? await buildTaskReply({
+      ? (await runTaskAutomation({
           messageText: promptText,
           senderName,
           channelId: message.channel,
           slackTs: threadTs,
           classification,
           project,
-        })
+          threadContext,
+          onProgress: async text => replyAsMe(message.channel, threadTs, text),
+        })).finalReply
       : await buildQueryReply({
           messageText: promptText,
           senderName,
           project,
+          threadContext,
         });
 
     try {

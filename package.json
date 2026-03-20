@@ -5,6 +5,8 @@
   "main": "index.js",
   "scripts": {
     "start": "npx tsx slack.ts",
+    "refresh-memory": "npx tsx refresh-memory.ts",
+    "typecheck": "npx tsc --noEmit",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

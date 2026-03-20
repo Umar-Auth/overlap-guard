@@ -1,9 +1,7 @@
 import { config } from '../config';
-import { createLinearTaskFromSlack } from '../automation/linearTasks';
-import { answerWorkStatusQuery } from '../integrations/linearAssignments';
+import { answerMyWorkStatusQuery } from '../integrations/myWork';
 import { loadMemoryProfile } from '../memory/profile';
 import type { ProjectRegistryEntry } from '../projects/registry';
-import type { MessageClassification } from './classifier';
 import { generateText } from './openai';
 
 function buildFallbackReply(senderName?: string) {
@@ -15,9 +13,14 @@ export async function buildQueryReply(params: {
   messageText: string;
   senderName: string;
   project?: ProjectRegistryEntry;
+  threadContext?: string;
 }) {
   const fallbackReply = buildFallbackReply(params.senderName);
-  const workStatusReply = await answerWorkStatusQuery(params.messageText, params.project);
+  const workStatusReply = await answerMyWorkStatusQuery({
+    messageText: params.messageText,
+    threadContext: params.threadContext,
+    project: params.project,
+  });
   if (workStatusReply) {
     return workStatusReply;
   }
@@ -45,6 +48,7 @@ export async function buildQueryReply(params: {
       [
         `Sender: ${params.senderName}`,
         `Project: ${params.project ? `${params.project.name} - ${params.project.description}` : 'unknown'}`,
+        `Thread context: ${params.threadContext || 'none'}`,
         `Message: ${params.messageText || '(no additional text provided)'}`,
       ].join('\n'),
     );
@@ -54,25 +58,4 @@ export async function buildQueryReply(params: {
     console.error('Query reply generation error:', err.message);
     return fallbackReply;
   }
-}
-
-export async function buildTaskReply(params: {
-  messageText: string;
-  senderName: string;
-  channelId: string;
-  slackTs: string;
-  classification: MessageClassification;
-  project?: ProjectRegistryEntry;
-}) {
-  const issue = await createLinearTaskFromSlack(params);
-
-  if (issue) {
-    return `Noted. I captured this as task *${issue.identifier}*${params.project ? ` for *${params.project.name}*` : ''} and I’ll continue from there: ${issue.url}`;
-  }
-
-  if (config.autoCreateLinearTasks) {
-    return `Noted. This looks like a task${params.project ? ` for *${params.project.name}*` : ''}. I could not create the Linear issue automatically, but I’ve classified it and I’ll treat it as queued work.`;
-  }
-
-  return `Noted. This looks like a task${params.project ? ` for *${params.project.name}*` : ''}. I’ve classified it as work to execute next. Enable \`AUTO_CREATE_LINEAR_TASKS=true\` to have me open a Linear issue automatically.`;
 }

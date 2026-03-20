@@ -31,11 +31,26 @@ function looksLikeWorkStatusQuery(messageText: string) {
   return patterns.some(pattern => pattern.test(text));
 }
 
+let cachedLinearUsers: any[] | null = null;
+let cachedLinearUsersAt = 0;
+const LINEAR_USERS_TTL_MS = 5 * 60 * 1000;
+
+async function getLinearUsers() {
+  if (cachedLinearUsers && Date.now() - cachedLinearUsersAt < LINEAR_USERS_TTL_MS) {
+    return cachedLinearUsers;
+  }
+
+  const result = await linear.users();
+  cachedLinearUsers = result.nodes;
+  cachedLinearUsersAt = Date.now();
+  return cachedLinearUsers;
+}
+
 async function resolveUserFromQuery(messageText: string) {
-  const users = await linear.users();
+  const users = await getLinearUsers();
   const normalizedMessage = normalize(messageText);
 
-  const candidates = users.nodes
+  const candidates = users
     .map(user => {
       const names = [
         user.name || '',

@@ -11,13 +11,31 @@ export interface MessageClassification {
   executionMode: 'none' | 'linear_ticket' | 'code_change';
 }
 
-function heuristicClassify(messageText: string, project?: ProjectRegistryEntry): MessageClassification {
-  const text = messageText.toLowerCase();
-  const taskWords = ['fix', 'implement', 'build', 'create', 'update', 'change', 'ship', 'deploy', 'bug', 'issue', 'ticket'];
-  const queryWords = ['what', 'why', 'how', 'can you explain', 'which', 'when', 'where'];
+function heuristicClassify(messageText: string, project?: ProjectRegistryEntry, threadContext?: string): MessageClassification {
+  const text = [threadContext, messageText].filter(Boolean).join(' ').toLowerCase();
+  const taskWords = ['fix', 'implement', 'build', 'create', 'update', 'change', 'ship', 'deploy', 'bug', 'issue', 'ticket', 'resolve', 'add'];
+  const queryWords = ['what', 'why', 'how', 'can you explain', 'which', 'when', 'where', 'show', 'list', 'fetch', 'get', 'pull', 'tell me'];
+  const codeWords = ['fix', 'implement', 'build', 'update', 'change', 'resolve', 'refactor', 'add'];
+  const infoRetrievalWords = ['show', 'list', 'fetch', 'get', 'pull'];
+  const workStatusTargets = ['task', 'tasks', 'ticket', 'tickets', 'issue', 'issues', 'pr', 'prs', 'work', 'working on', 'assigned'];
 
-  const looksTask = taskWords.some(word => text.includes(word));
-  const looksQuery = queryWords.some(word => text.includes(word));
+  const matchesWord = (word: string) => new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(text);
+  const looksTask = taskWords.some(matchesWord);
+  const looksQuery = queryWords.some(matchesWord);
+  const looksCodeChange = codeWords.some(matchesWord);
+  const looksInfoRetrieval = infoRetrievalWords.some(matchesWord);
+  const looksLikeWorkStatusLookup = workStatusTargets.some(matchesWord);
+
+  if (looksInfoRetrieval && looksLikeWorkStatusLookup && !looksCodeChange) {
+    return {
+      type: 'query',
+      confidence: 'high',
+      summary: messageText.trim().slice(0, 140),
+      needsClarification: false,
+      projectHint: project?.id,
+      executionMode: 'none',
+    };
+  }
 
   if (looksTask && !looksQuery) {
     return {
@@ -26,7 +44,7 @@ function heuristicClassify(messageText: string, project?: ProjectRegistryEntry):
       summary: messageText.trim().slice(0, 140),
       needsClarification: false,
       projectHint: project?.id,
-      executionMode: 'linear_ticket',
+      executionMode: looksCodeChange ? 'code_change' : 'linear_ticket',
     };
   }
 
@@ -40,9 +58,9 @@ function heuristicClassify(messageText: string, project?: ProjectRegistryEntry):
   };
 }
 
-export async function classifyMessage(messageText: string, project?: ProjectRegistryEntry) {
+export async function classifyMessage(messageText: string, project?: ProjectRegistryEntry, threadContext?: string) {
   if (!config.openAiApiKey) {
-    return heuristicClassify(messageText, project);
+    return heuristicClassify(messageText, project, threadContext);
   }
 
   try {
@@ -52,10 +70,17 @@ export async function classifyMessage(messageText: string, project?: ProjectRegi
         'You classify Slack messages for Umar\'s delegate.',
         'Return strict JSON only.',
         'A query asks for explanation, status, guidance, or information.',
+        'Requests to fetch, list, show, pull, or get current tickets, issues, PRs, or work status are queries, not tasks.',
+        'Very short follow-ups like "me", "mine", "my work", or "my tickets" should inherit the thread context.',
         'A task asks for work to be done, changed, implemented, fixed, created, or executed.',
         'Use executionMode="code_change" only when the user is explicitly asking for implementation work.',
       ].join(' '),
-      `Project context: ${project ? `${project.name} - ${project.description}` : 'unknown'}\nMessage: ${messageText}\nReturn JSON with keys: type, confidence, summary, needsClarification, projectHint, executionMode.`
+      [
+        `Project context: ${project ? `${project.name} - ${project.description}` : 'unknown'}`,
+        `Thread context: ${threadContext || 'none'}`,
+        `Message: ${messageText}`,
+        'Return JSON with keys: type, confidence, summary, needsClarification, projectHint, executionMode.',
+      ].join('\n')
     );
 
     if (result?.type === 'query' || result?.type === 'task') {
@@ -77,5 +102,5 @@ export async function classifyMessage(messageText: string, project?: ProjectRegi
     console.error('Message classification error:', err.message);
   }
 
-  return heuristicClassify(messageText, project);
+  return heuristicClassify(messageText, project, threadContext);
 }

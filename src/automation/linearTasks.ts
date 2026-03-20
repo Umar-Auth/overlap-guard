@@ -2,6 +2,7 @@ import { linear } from '../clients';
 import { config } from '../config';
 import type { MessageClassification } from '../brain/classifier';
 import type { ProjectRegistryEntry } from '../projects/registry';
+import { getLinearCurrentUser } from '../integrations/identity';
 
 let cachedTeamId: string | null = null;
 
@@ -57,6 +58,7 @@ export async function createLinearTaskFromSlack(params: {
         'Original request:',
         params.messageText,
       ].join('\n'),
+      assigneeId: (await getLinearCurrentUser())?.id,
       ...(params.project?.linearProjectId ? { projectId: params.project.linearProjectId } : {}),
     });
 
