@@ -5,7 +5,7 @@ import { runTaskAutomation } from '../automation/taskRunner';
 import { config } from '../config';
 import { logObservation } from '../observation/log';
 import { resolveProject } from '../projects/registry';
-import { getThreadContext } from './context';
+import { getRoutingThreadContext, getThreadContext } from './context';
 import { replyAsMe } from './replies';
 import { clearAssistantLoader, showAssistantLoader } from './status';
 
@@ -185,10 +185,11 @@ export function registerAutoReply() {
     const senderName = isOwnMessage ? 'Umar' : await getSenderName(message.user);
     const promptText = cleanPromptText(message.text);
     const threadContext = await getThreadContext(message.channel, threadTs, message.ts);
+    const routingThreadContext = await getRoutingThreadContext(message.channel, threadTs, message.ts);
 
-    const project = resolveProject(promptText, message.channel);
+    const project = resolveProject(promptText, message.channel, routingThreadContext);
 
-    const classification = await classifyMessage(promptText, project, threadContext);
+    const classification = await classifyMessage(promptText, project, routingThreadContext || threadContext);
     await safeProgress(
       () => showAssistantLoader(message.channel, threadTs, classification.type === 'task' ? 'task' : 'query'),
       'show typed loader'
@@ -211,6 +212,7 @@ export function registerAutoReply() {
       promptText,
       project: project?.name,
       threadContext,
+      routingThreadContext,
       classification,
     });
 

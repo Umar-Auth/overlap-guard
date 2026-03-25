@@ -1,3 +1,9 @@
+import { existsSync } from 'fs';
+
+const defaultCodexCliPath = existsSync('/Applications/Codex.app/Contents/Resources/codex')
+  ? '/Applications/Codex.app/Contents/Resources/codex'
+  : 'codex';
+
 export const config = {
   slackSigningSecret: process.env.SLACK_SIGNING_SECRET!,
   slackBotToken: process.env.SLACK_BOT_TOKEN!,
@@ -29,7 +35,7 @@ export const config = {
   githubMeLogin: process.env.GITHUB_ME_LOGIN,
   linearMeEmail: process.env.LINEAR_ME_EMAIL,
   linearMeName: process.env.LINEAR_ME_NAME,
-  projectSearchRoots: (process.env.PROJECT_SEARCH_ROOTS || '')
+  projectSearchRoots: (process.env.PROJECT_SEARCH_ROOTS || '/Users/umar_cpp/Documents/github,/Users/umar_cpp/Documents/GitHub')
     .split(',')
     .map(root => root.trim())
     .filter(Boolean),
@@ -39,4 +45,7 @@ export const config = {
   taskPushEnabled: process.env.TASK_PUSH_ENABLED !== 'false',
   taskCreatePrEnabled: process.env.TASK_CREATE_PR_ENABLED !== 'false',
   observationModel: process.env.OBSERVATION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini',
+  codexCliPath: process.env.CODEX_CLI_PATH || defaultCodexCliPath,
+  codexExecModel: process.env.CODEX_EXEC_MODEL,
+  codexDangerouslyBypassSandbox: process.env.CODEX_DANGEROUSLY_BYPASS_SANDBOX !== 'false',
 };

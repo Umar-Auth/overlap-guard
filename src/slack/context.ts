@@ -1,6 +1,7 @@
 import type { WebClient } from '@slack/web-api';
 
 import { app, userClient } from '../clients';
+import { config } from '../config';
 
 const USER_NAME_CACHE = new Map<string, string>();
 const MAX_CONTEXT_MESSAGES = 200;
@@ -104,6 +105,22 @@ async function formatMessage(message: any) {
   return `${time ? `[${time}] ` : ''}${speaker}: ${text}`;
 }
 
+function isUserPromptForRouting(message: any) {
+  const text = normalizeContextText(message?.text);
+  if (!text) {
+    return false;
+  }
+
+  const isOwnMessage = Boolean(config.myUserId && message.user === config.myUserId);
+  const explicitlyMentioned = Boolean(config.myUserId && text.includes(`<@${config.myUserId}>`));
+
+  if (isOwnMessage) {
+    return explicitlyMentioned;
+  }
+
+  return true;
+}
+
 export async function getThreadContext(channel: string, threadTs: string, currentMessageTs?: string) {
   try {
     const messages = await loadThreadMessages(channel, threadTs);
@@ -118,6 +135,25 @@ export async function getThreadContext(channel: string, threadTs: string, curren
     return formatted.filter(Boolean).join('\n');
   } catch (err: any) {
     console.error('Slack thread context error:', err.message);
+    return '';
+  }
+}
+
+export async function getRoutingThreadContext(channel: string, threadTs: string, currentMessageTs?: string) {
+  try {
+    const messages = await loadThreadMessages(channel, threadTs);
+
+    const formatted = await Promise.all(
+      messages
+        .filter(message => message?.text)
+        .filter(message => !currentMessageTs || message.ts !== currentMessageTs)
+        .filter(isUserPromptForRouting)
+        .map(formatMessage)
+    );
+
+    return formatted.filter(Boolean).join('\n');
+  } catch (err: any) {
+    console.error('Slack routing context error:', err.message);
     return '';
   }
 }

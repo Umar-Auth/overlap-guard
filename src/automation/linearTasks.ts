@@ -25,6 +25,14 @@ async function resolveLinearTeamId(project?: ProjectRegistryEntry) {
     return cachedTeamId;
   }
 
+  console.error('Linear task creation error: could not resolve team automatically', {
+    availableTeams: teams.nodes.map(team => ({
+      id: team.id,
+      name: team.name,
+      key: team.key,
+    })),
+    resolvedProject: project?.name || null,
+  });
   return null;
 }
 
@@ -43,8 +51,14 @@ export async function createLinearTaskFromSlack(params: {
   try {
     const teamId = await resolveLinearTeamId(params.project);
     if (!teamId) {
+      console.error('Linear task creation error: missing team id', {
+        project: params.project?.name || null,
+        linearProjectId: params.project?.linearProjectId || null,
+      });
       return null;
     }
+
+    const assignee = await getLinearCurrentUser();
 
     const payload = await linear.createIssue({
       teamId,
@@ -58,7 +72,7 @@ export async function createLinearTaskFromSlack(params: {
         'Original request:',
         params.messageText,
       ].join('\n'),
-      assigneeId: (await getLinearCurrentUser())?.id,
+      assigneeId: assignee?.id,
       ...(params.project?.linearProjectId ? { projectId: params.project.linearProjectId } : {}),
     });
 
@@ -74,7 +88,13 @@ export async function createLinearTaskFromSlack(params: {
       url: issue.url,
     };
   } catch (err: any) {
-    console.error('Linear task creation error:', err.message);
+    console.error('Linear task creation error:', {
+      message: err.message,
+      stack: err.stack,
+      project: params.project?.name || null,
+      linearProjectId: params.project?.linearProjectId || null,
+      summary: params.classification.summary,
+    });
     return null;
   }
 }

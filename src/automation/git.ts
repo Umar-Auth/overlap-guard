@@ -12,6 +12,17 @@ export interface PreparedWorkspace {
   repoOwner: string;
   repoName: string;
   baseRepoPath: string;
+  repoRoot: string;
+}
+
+export interface WorkspaceInspection {
+  requestedPath: string;
+  repoRoot: string;
+  baseBranch: string;
+  repoOwner: string;
+  repoName: string;
+  projectId?: string;
+  projectName?: string;
 }
 
 function sanitizeBranchPart(input: string) {
@@ -20,6 +31,25 @@ function sanitizeBranchPart(input: string) {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 40) || 'task';
+}
+
+function buildGitHubAuthArgs() {
+  const token = config.githubToken;
+  const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
+
+  return [
+    '-c', 'credential.helper=',
+    '-c', 'core.askPass=',
+    '-c', 'credential.interactive=never',
+    '-c', `http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic}`,
+  ];
+}
+
+function gitAuthEnv() {
+  return {
+    GIT_TERMINAL_PROMPT: '0',
+    GCM_INTERACTIVE: 'Never',
+  };
 }
 
 async function detectCurrentRepoMatch(project: ProjectRegistryEntry) {
@@ -39,6 +69,53 @@ async function detectCurrentRepoMatch(project: ProjectRegistryEntry) {
     }
   } catch {
     return null;
+  }
+
+  return null;
+}
+
+async function resolveRepoRoot(candidate: string) {
+  const result = await runCommand('git', ['rev-parse', '--show-toplevel'], candidate, { timeoutMs: 30000 });
+  if (result.code !== 0 || !result.stdout.trim()) {
+    return null;
+  }
+
+  return result.stdout.trim();
+}
+
+async function remoteBranchExists(repoRoot: string, branch: string) {
+  const result = await runCommand('git', ['show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`], repoRoot, {
+    timeoutMs: 30000,
+  });
+  return result.code === 0;
+}
+
+async function detectOriginHeadBranch(repoRoot: string) {
+  const result = await runCommand('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], repoRoot, {
+    timeoutMs: 30000,
+  });
+
+  if (result.code !== 0 || !result.stdout.trim()) {
+    return null;
+  }
+
+  return result.stdout.trim().replace(/^origin\//, '');
+}
+
+async function detectBaseBranch(repoRoot: string, preferredBranch?: string) {
+  if (preferredBranch && await remoteBranchExists(repoRoot, preferredBranch)) {
+    return preferredBranch;
+  }
+
+  for (const branch of ['staging', 'main']) {
+    if (await remoteBranchExists(repoRoot, branch)) {
+      return branch;
+    }
+  }
+
+  const originHead = await detectOriginHeadBranch(repoRoot);
+  if (originHead) {
+    return originHead;
   }
 
   return null;
@@ -74,31 +151,124 @@ export async function locateProjectWorkspace(project?: ProjectRegistryEntry) {
   return null;
 }
 
+export async function inspectProjectWorkspace(project?: ProjectRegistryEntry) {
+  if (!project) {
+    return {
+      ok: false as const,
+      reason: 'No project was resolved from the Slack request.',
+    };
+  }
+
+  const requestedPath = await locateProjectWorkspace(project);
+  if (!requestedPath) {
+    return {
+      ok: false as const,
+      reason: `I could not find a local repo for *${project.name}*.`,
+    };
+  }
+
+  const repoRoot = await resolveRepoRoot(requestedPath);
+  if (!repoRoot) {
+    return {
+      ok: false as const,
+      reason: `Resolved path is not a git repository: ${requestedPath}`,
+      details: {
+        requestedPath,
+        projectId: project.id,
+        projectName: project.name,
+      },
+    };
+  }
+
+  const repoOwner = project.repoOwner || config.repoOwner;
+  const repoName = project.repoName || config.repoName;
+  const baseBranch = await detectBaseBranch(repoRoot, project.baseBranch);
+
+  if (!baseBranch) {
+    return {
+      ok: false as const,
+      reason: `I could not determine a base branch for ${repoName}.`,
+      details: {
+        requestedPath,
+        repoRoot,
+        repoOwner,
+        repoName,
+        projectId: project.id,
+        projectName: project.name,
+      },
+    };
+  }
+
+  return {
+    ok: true as const,
+    inspection: {
+      requestedPath,
+      repoRoot,
+      baseBranch,
+      repoOwner,
+      repoName,
+      projectId: project.id,
+      projectName: project.name,
+    } satisfies WorkspaceInspection,
+  };
+}
+
 export async function prepareTaskWorkspace(params: {
   project?: ProjectRegistryEntry;
   branchHint: string;
+  inspection?: WorkspaceInspection;
 }) {
-  const workspace = await locateProjectWorkspace(params.project);
-  if (!workspace) {
-    return { ok: false as const, reason: 'No local project workspace is configured for this project.' };
+  let inspected = params.inspection;
+  if (!inspected) {
+    const inspectionResult = await inspectProjectWorkspace(params.project);
+    if (!inspectionResult.ok) {
+      return {
+        ok: false as const,
+        reason: inspectionResult.reason,
+      };
+    }
+    inspected = inspectionResult.inspection;
   }
 
-  const repoOwner = params.project?.repoOwner || config.repoOwner;
-  const repoName = params.project?.repoName || config.repoName;
-  const baseBranch = params.project?.baseBranch || 'staging';
-  const branchName = `codex/${sanitizeBranchPart(params.project?.id || repoName)}-${sanitizeBranchPart(params.branchHint)}-${Date.now().toString().slice(-6)}`;
+  if (!inspected) {
+    return { ok: false as const, reason: 'No verified repo workspace is available for this task.' };
+  }
+
+  const branchName = `codex/${sanitizeBranchPart(params.project?.id || inspected.repoName)}-${sanitizeBranchPart(params.branchHint)}-${Date.now().toString().slice(-6)}`;
 
   try {
-    await runCommand('git', ['fetch', 'origin', baseBranch], workspace, { timeoutMs: 120000 });
+    const fetchResult = await runCommand('git', ['fetch', 'origin', inspected.baseBranch], inspected.repoRoot, {
+      timeoutMs: 120000,
+      env: gitAuthEnv(),
+    });
+    let finalFetchResult = fetchResult;
+    if (fetchResult.code !== 0) {
+      finalFetchResult = await runCommand(
+        'git',
+        [...buildGitHubAuthArgs(), 'fetch', 'origin', inspected.baseBranch],
+        inspected.repoRoot,
+        {
+          timeoutMs: 120000,
+          env: gitAuthEnv(),
+        }
+      );
+    }
 
-    const worktreesRoot = path.join(workspace, '.delegate-worktrees');
+    if (finalFetchResult.code !== 0) {
+      return {
+        ok: false as const,
+        reason: finalFetchResult.stderr || finalFetchResult.stdout || `Failed to fetch origin/${inspected.baseBranch}.`,
+      };
+    }
+
+    const worktreesRoot = path.join(inspected.repoRoot, '.delegate-worktrees');
     mkdirSync(worktreesRoot, { recursive: true });
     const worktreePath = path.join(worktreesRoot, branchName.replace(/\//g, '-'));
 
     const addResult = await runCommand(
       'git',
-      ['worktree', 'add', '-B', branchName, worktreePath, `origin/${baseBranch}`],
-      workspace,
+      ['worktree', 'add', '-B', branchName, worktreePath, `origin/${inspected.baseBranch}`],
+      inspected.repoRoot,
       { timeoutMs: 120000 }
     );
 
@@ -109,15 +279,25 @@ export async function prepareTaskWorkspace(params: {
       };
     }
 
+    await runCommand('git', ['config', '--worktree', 'credential.interactive', 'never'], worktreePath, {
+      timeoutMs: 30000,
+      env: gitAuthEnv(),
+    });
+    await runCommand('git', ['config', '--worktree', 'credential.helper', ''], worktreePath, {
+      timeoutMs: 30000,
+      env: gitAuthEnv(),
+    });
+
     return {
       ok: true as const,
       workspace: {
         workspacePath: worktreePath,
         branchName,
-        baseBranch,
-        repoOwner,
-        repoName,
-        baseRepoPath: workspace,
+        baseBranch: inspected.baseBranch,
+        repoOwner: inspected.repoOwner,
+        repoName: inspected.repoName,
+        baseRepoPath: inspected.requestedPath,
+        repoRoot: inspected.repoRoot,
       } satisfies PreparedWorkspace,
     };
   } catch (err: any) {
@@ -177,8 +357,9 @@ export async function pushBranch(params: {
   workspacePath: string;
   branchName: string;
 }) {
-  const result = await runCommand('git', ['push', '-u', 'origin', params.branchName], params.workspacePath, {
+  const result = await runCommand('git', [...buildGitHubAuthArgs(), 'push', '-u', 'origin', params.branchName], params.workspacePath, {
     timeoutMs: 5 * 60 * 1000,
+    env: gitAuthEnv(),
   });
 
   return {
@@ -236,4 +417,3 @@ export function writeTaskArtifact(params: {
   writeFileSync(filePath, params.content, 'utf8');
   return filePath;
 }
-
